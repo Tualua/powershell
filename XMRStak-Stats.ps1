@@ -1,6 +1,8 @@
-﻿param (
-  [string[]]$Miners
+﻿#XMR-Stak statistics
+param (
+  [string[]]$Miners = @()
 )
+
 function Get-MinersFromFile 
 {
   param
@@ -8,16 +10,20 @@ function Get-MinersFromFile
     [Parameter(Mandatory=$true)][string]
     $Path    
   )
-  $Miners = @()
-  $regexIPAddr = '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'
-  Get-Content -Path $Path | ForEach-Object {
-    If ($_ -match $regexIPAddr)
-    {    
-      $Miners += [string]$_      
+  $hashMiners = @()
+  $config = Get-Content -Path $Path | ConvertFrom-Json 
+  ForEach ($miner in $config.miners)
+  {
+    $hashMiner = @{}
+    foreach ($property in $miner.PSObject.Properties) 
+    {
+      $hashMiner[$property.Name] = $property.Value
     }
-  }
+    $hashMiners += $hashMiner
+    
+  }  
   
-  return $Miners | Sort-Object -Property { [Version] $_} -Unique
+  return $hashMiners #| Sort-Object -Property { [Version] $_} -Unique
 }
 function Get-MinerData
 {
@@ -47,32 +53,29 @@ function Get-MinerData
 
 If (!($Miners))
 {
-  $Miners = Get-MinersFromFile -Path $(Join-Path -Path $PSSCriptRoot -ChildPath 'xmrminers.txt' )
+  $Miners = Get-MinersFromFile -Path $(Join-Path -Path $PSSCriptRoot -ChildPath 'xmrminers.json' )
 }
  
-$username = ''
-$password = ''
-
-$minerport = '8888'
 $stats = @()
 $total10s= 0
 $total60s= 0
 $total15m= 0
 $totals = @()
+
 ForEach ($miner in $Miners)
 {
-  
-  $rawdata = Get-MinerData -user $username -pass $password -miner $miner -minerport $minerport
+  #Write-Host ($miner['macaddr'] -replace ':')
+  $rawdata = Get-MinerData -user $miner['http_user'] -pass $miner['http_user_pass'] -miner $miner['hostname'] -minerport $miner['http_port']
   If ($rawdata)
   {
     $stats += [psCustomObject]@{
-        'miner' = $miner
+        'miner' = $miner['macaddr'] -replace ':'
         'hashrate 10s' = [int]$($rawdata.content|ConvertFrom-Json).hashrate.total[0]
         'hashrate 60s' = [int]$($rawdata.content|ConvertFrom-Json).hashrate.total[1]
         'hashrate 15m' = [int]$($rawdata.content|ConvertFrom-Json).hashrate.total[2]
         'threads' = [int]$($rawdata.content|ConvertFrom-Json).hashrate.threads.count
       
-  }
+    }
     $total10s += [int]$($rawdata.content|ConvertFrom-Json).hashrate.total[0] 
     $total60s += [int]$($rawdata.content|ConvertFrom-Json).hashrate.total[1] 
     $total15m += [int]$($rawdata.content|ConvertFrom-Json).hashrate.total[2] 
@@ -80,7 +83,7 @@ ForEach ($miner in $Miners)
   Else
   {
     $stats += [psCustomObject]@{
-        'miner' = $miner
+        'miner' = $miner['macaddr'] -replace ':'
         'hashrate 10s' = 0
         'hashrate 60s' = 0
         'hashrate 15m' = 0
@@ -90,7 +93,7 @@ ForEach ($miner in $Miners)
 }
 
 $stats.GetEnumerator()|Sort-Object -Property 'hashrate 15m' -Descending | Format-Table
-
+#$stats| Format-Table
 Write-Host $("Total miners:", $stats.Count -join ' ')
 
 
@@ -112,5 +115,5 @@ $totals += [psCustomObject]@{
   }
 $totals | Format-Table
 
-Write-Host -NoNewLine 'Press any key to continue...';
-$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown');
+#Write-Host -NoNewLine 'Press any key to continue...';
+#$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown');
