@@ -63,69 +63,80 @@ function Get-SwitchFDBCisco
        Write-Error "SNMP Walk error: $_"
        
     }
+    
     foreach ($vlan in $swVlans)
     {
-      $vlanid = $($vlan.id).ToString().SubString($vtpVlanState.Length)
+      $vlanid = [int]$($vlan.id).ToString().SubString($vtpVlanState.Length)
+      If (($vlanid -le $MaxVLAN) -and ($vlanid -ge $MinVLAN))
+      {
       
-      $oid = $dot1dBasePortIfIndex
-      $swMappings = New-Object 'System.Collections.Generic.List[Lextm.SharpSnmpLib.Variable]'
-      try 
-      {
-        [Lextm.SharpSnmpLib.Messaging.Messenger]::BulkWalk($ver, $svr, $('public@',$vlanid -join ''), $oid, $swMappings, 10000, $maxRepetitions, $walkMode, $null, $null)|Out-Null
-      } 
-      catch [Lextm.SharpSnmpLib.Messaging.TimeoutException]
-      {
-        Write-Error "SNMP Timeout connecting to $svr getting info for VLAN $vlanid"
-      }
-      catch 
-      {
-        Write-Error "SNMP Walk error: $_"
-      }
-      $tableSwMappings = @{}
-      ForEach ($mapping in $swMappings)
-      {
-        $tableSwMappings.Add($($mapping.Id).ToString().SubString($dot1dBasePortIfIndex.Length),$($mapping.Data).ToString())
-      }
+        $oid = $dot1dBasePortIfIndex
+        $swMappings = New-Object 'System.Collections.Generic.List[Lextm.SharpSnmpLib.Variable]'
+        try 
+        {
+          [Lextm.SharpSnmpLib.Messaging.Messenger]::BulkWalk($ver, $svr, $('public@',$vlanid -join ''), $oid, $swMappings, 10000, $maxRepetitions, $walkMode, $null, $null)|Out-Null
+        } 
+        catch [Lextm.SharpSnmpLib.Messaging.TimeoutException]
+        {
+          Write-Error "SNMP Timeout connecting to $svr getting info for VLAN $vlanid"
+        }
+        catch 
+        {
+          Write-Error "SNMP Walk error: $_"
+        }
+        $tableSwMappings = @{}
+        ForEach ($mapping in $swMappings)
+        {
+          $tableSwMappings.Add($($mapping.Id).ToString().SubString($dot1dBasePortIfIndex.Length),$($mapping.Data).ToString())
+        }
       
-      Start-Sleep -Milliseconds $SleepTimer
-      $vlanFDBPortTemp = New-Object 'System.Collections.Generic.List[Lextm.SharpSnmpLib.Variable]'
-      $oid = $dot1dTpFdbPort
-      try 
-      {
-        [Lextm.SharpSnmpLib.Messaging.Messenger]::BulkWalk($ver, $svr, $('public@',$vlanid -join ''), $oid, $vlanFDBPortTemp, 10000, $maxRepetitions, $walkMode, $null, $null)|Out-Null
-      } 
-      catch [Lextm.SharpSnmpLib.Messaging.TimeoutException]
-      {
-        Write-Error "SNMP Timeout connecting to $svr getting info for VLAN $vlanid"
-      }
-      catch 
-      {
-        Write-Error "SNMP Walk error: $_"
-      } 
-       If ($vlanFDBPortTemp.Count -gt 0)
-       {
-         ForEach ($FDBItem in $vlanFDBPortTemp)
-         {
-           $MACaddrDec = @()
-           $MACAddrHex = @()
-           $MACaddrDec =$($FDBItem.Id).ToString().Substring(23).Split('.')
-           ForEach ($octet in $MACaddrDec)
-           {
-             $MacAddrHex += '{0:X2}' -f [int]$octet
-           }
-           $MACAddr = $MacAddrHex -join ":"
-           $Interface = $tableSwIfNames[$($tableSwMappings["$($FDBItem.Data)"])]
-           If ($Interface -ne $IgnoreIf)
-           {
-             $MACAddresses += [PSCustomObject]@{
+        Start-Sleep -Milliseconds $SleepTimer
+        $vlanFDBPortTemp = New-Object 'System.Collections.Generic.List[Lextm.SharpSnmpLib.Variable]'
+        $oid = $dot1dTpFdbPort
+        try 
+        {
+          [Lextm.SharpSnmpLib.Messaging.Messenger]::BulkWalk($ver, $svr, $('public@',$vlanid -join ''), $oid, $vlanFDBPortTemp, 10000, $maxRepetitions, $walkMode, $null, $null)|Out-Null
+        } 
+        catch [Lextm.SharpSnmpLib.Messaging.TimeoutException]
+        {
+          Write-Error "SNMP Timeout connecting to $svr getting info for VLAN $vlanid"
+        }
+        catch 
+        {
+          Write-Error "SNMP Walk error: $_"
+        } 
+        If ($vlanFDBPortTemp.Count -gt 0)
+        {
+          ForEach ($FDBItem in $vlanFDBPortTemp)
+          {
+            $MACaddrDec = @()
+            $MACAddrHex = @()
+            $MACaddrDec =$($FDBItem.Id).ToString().Substring(23).Split('.')
+            ForEach ($octet in $MACaddrDec)
+            {
+              $MacAddrHex += '{0:X2}' -f [int]$octet
+            }
+            $MACAddr = $MacAddrHex -join ":"
+            $InterfaceName = $tableSwIfNames[$($tableSwMappings["$($FDBItem.Data)"])]
+            $InterfaceNumber = [int]$($tableSwMappings["$($FDBItem.Data)"])-10000
+            If ($InterfaceNumber -gt 100)
+            {
+              $InterfaceNumber = $InterfaceNumber-100+48
+            }
+            #$InterfaceNumber = [int]$($tableSwMappings["$($FDBItem.Data)"])
+            If (!($IgnoreIf.Contains($InterfaceName)))
+            {
+              $MACAddresses += [PSCustomObject]@{
+                        ifNumber = $InterfaceNumber
                         macaddr = $MACAddr
-                        ifNumber = $Interface
+                        ifName = $InterfaceName
+                        VID = $vlanid
                       }
-           }
-         }
+            }
+          }
          
-       }
-  
+        }
+      } 
     }
     
     
@@ -133,4 +144,4 @@ function Get-SwitchFDBCisco
    return $MACAddresses
 }
 
-Get-SwitchFDBCisco -IPAddress '172.17.17.124' -IgnoreIf 'Gi1/0/4'
+Get-SwitchFDBCisco -IPAddress '172.17.17.124' -IgnoreIf 'Gi1/0/4' -MinVLAN 6 -MaxVLAN 33 |Sort -Property ifNumber
