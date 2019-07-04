@@ -2,6 +2,15 @@
 Import-Module -Name $env:windir\Mikrotik.dll
 Add-Type -AssemblyName SharpSnmpLib
 
+function Write-Log
+{
+  param (
+    [string]$Message,
+    [string]$File
+  )
+  $Message | Add-Content -Path $(Join-Path -Path $PSScriptRoot -ChildPath "\log\$File")
+
+}
 function Get-SwitchFDBCisco
 {
   param (
@@ -306,6 +315,7 @@ function Get-DHCPActiveLeases
     [Parameter(Mandatory=$true)][string]
     $Password
   )
+  $logfile = "dhcpserver_$(Get-Date -Format "yyyymmddhhmmss").log"
   $Connection = Connect-Mikrotik -IPaddress $RouterIPAddress -UserName $UserName -Password $Password -UseSSL
   $DHCPLeasesRaw = (Send-Mikrotik -Connection $Connection -Command '/ip/dhcp-server/lease/getall') -split "`r`n"
   Disconnect-Mikrotik -Connection $Connection
@@ -340,20 +350,28 @@ function Get-DHCPActiveLeases
   }
   ForEach ($lease in $NormalLeases)
   {
-    $tableLeases.Add($lease.MACAddress,$lease.IPAddress)
+    If ($lease.MACAddress)
+    {
+      $tableLeases.Add($lease.MACAddress,$lease.IPAddress)
+    }
+    Else
+    {
+      Write-Log -Message "$lease Error!" -File $logfile
+    }
   }
   
   #return $NormalLeases | Sort-Object -Property { [Version] $_.IPAddress}
   return $tableLeases
 }
-function Get-ASICInfo
-{
-  param (
-    [string]$IPAddress
+function Invoke-ASICAPICommand
+{param (
+    [string]$IPAddress,
+    [string]$command = 'stats',
+    [string]$parameter = '0',
+    [int]$port = 4028
   )
-  $port = 4028
-  $command = '{"command":"stats","parameter":"0"}'
   $commandDelay = 100
+  $APICommand = "{`"command`":`"$command`",`"parameter`":`"$parameter`"}"
   
   try
   {
@@ -369,7 +387,7 @@ function Get-ASICInfo
   {
     $stream = $socket.GetStream()
     $writer = new-object System.IO.StreamWriter $stream
-    $writer.WriteLine($command)
+    $writer.WriteLine($APIcommand)
     $writer.Flush()
     Start-Sleep -m $commandDelay
     $buffer = new-object System.Byte[] 1024
@@ -400,14 +418,103 @@ function Get-ASICInfo
     } while($foundmore)
     If ($outputBuffer)
     {
-      $result = $($($outputBuffer -replace '}{','},{') -replace "`0", "" | ConvertFrom-Json|Select -ExpandProperty stats)[0]
+      
+      $stringOutputBuffer = $($outputBuffer -join '') -replace "`0", ""
+      $result = $($stringOutputBuffer -replace '}{','},{')| ConvertFrom-Json      
     }
     Else
     {
       $result = [psCustomObject]@{Type = 'Unknown'}
     }
+    
   }
-  return $result #| Add-Member -MemberType NoteProperty -Name 'ipaddr' -Value $IPAddress
+  return $result  
+}
+function Get-ASICInfo
+{
+  param (
+    [string]$IPAddress
+  )
+  $result = @()
+  $ASICStatus = Invoke-ASICAPICommand -IPAddress $IPAddress -command 'stats'
+  If (!($ASICStatus.Type -eq 'Unknown'))
+  {
+    $ASICSpools = Invoke-ASICAPICommand -IPAddress $IPAddress -command 'pools'
+    $pool0url = $ASICSpools.POOLS[0].URL.ToString()
+    $pool0name = $pool0url.SubString($pool0url.IndexOf('//')+2,$pool0url.LastIndexOf(':')-$pool0url.IndexOf('//')-2)
+    $pool0user = $ASICSpools.POOLS[0].user
+    
+    $pool1url = $ASICSpools.POOLS[1].URL.ToString()
+    If ($pool1url -ne '')
+    {
+      $pool1name = $pool1url.SubString($pool1url.IndexOf('//')+2,$pool1url.LastIndexOf(':')-$pool1url.IndexOf('//')-2)
+    }
+    Else
+    {
+      $pool1name = ''
+    }
+    $pool1user = $ASICSpools.POOLS[1].user
+    
+    $pool2url = $ASICSpools.POOLS[2].URL.ToString()
+    If ($pool2url -ne '')
+    {    
+      $pool2name = $pool2url.SubString($pool2url.IndexOf('//')+2,$pool2url.LastIndexOf(':')-$pool2url.IndexOf('//')-2)
+    }
+    Else
+    {
+      $pool2name = ''
+    }
+    $pool2user = $ASICSpools.POOLS[2].user
+    If ($ASICStatus.STATS[1].chain_power)
+    {
+      If ($ASICStatus.STATS[0].Type -like "*L3*")
+      {
+        $ASICPower = [float]$($ASICStatus.STATS[1].chain_power)
+      }
+      ElseIf ($ASICStatus.STATS[0].Type -like "*S9*")
+      {
+        $ASICPower = [float]$($ASICStatus.STATS[1].chain_power).ToString().SubString(0,$($ASICStatus.STATS[1].chain_power).ToString().IndexOf(' '))
+      }
+    }
+    Else
+    {
+      $ASICPower = 0.0
+    }
+    $result = [psCustomObject]@{
+      Type = $ASICStatus.STATS[0].Type
+      MinerVer = $ASICStatus.STATS[0].Miner
+      CompileTime = $ASICStatus.STATS[0].CompileTime
+      Hashrate = [float]$ASICStatus.STATS[1].'GHS av'
+      HashBladeCount = [int]$ASICStatus.STATS[1].miner_count
+      Power = $ASICPower
+      Pool0 = $pool0name
+      Pool0Worker = $pool0user
+      Pool1 = $pool1name
+      Pool1Worker = $pool1user
+      Pool2 = $pool2name
+      Pool2Worker = $pool2user
+    
+    }    
+  }
+  Else
+  {
+      $result = [psCustomObject]@{
+        Type = 'Unknown'
+        MinerVer = ''
+        CompileTime = ''
+        Hashrate = 0.0
+        HashBladeCount = 0
+        Power = 0.0
+        Pool0 = ''
+        Pool0Worker = ''
+        Pool1 = ''
+        Pool1Worker = ''
+        Pool2 = ''
+        Pool2Worker = ''
+      }
+     
+  }
+  return $result
 }
 function Get-NetworkConf
 {
@@ -416,7 +523,9 @@ function Get-NetworkConf
 }
 
 $FDB = @()
+
 $NetworkConf = Get-NetworkConf 
+Write-Host $NetworkConf.Switches.Count
 $MaxThreads = 10
 $SleepTimer = 200
 
@@ -471,6 +580,7 @@ While (@($Jobs | Where-Object {$_.Handle -ne $Null}).count -gt 0)  {
     #Write-Host $Job.object
     #$SwitchFDB|Format-Table
     $FDB += $SwitchFDB| Sort-Object -Property ifNumber
+    
     $Job.Thread.Dispose()
     $Job.Thread = $Null
     $Job.Handle = $Null        
@@ -483,12 +593,16 @@ $RunspacePool.Dispose() | Out-Null
 
 $DHCPLeases = Get-DHCPActiveLeases -RouterIPaddress $NetworkConf.dhcpserver.ipaddr -UserName $NetworkConf.dhcpserver.username -Password $NetworkConf.dhcpserver.password
 $Devices = @()
-$MaxThreads = 30  
+$MaxThreads = 100  
 $Jobs = @()
 $ISS = [system.management.automation.runspaces.initialsessionstate]::CreateDefault()
 $functionDefinition = Get-Content function:\Get-ASICInfo
 $functionEntry = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Get-ASICInfo", $functionDefinition
 $ISS.Commands.Add($functionEntry)
+$functionDefinition = Get-Content function:\Invoke-ASICAPICommand
+$functionEntry = New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry -ArgumentList "Invoke-ASICAPICommand", $functionDefinition
+$ISS.Commands.Add($functionEntry)
+
 $RunspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxThreads, $ISS, $Host)
 $RunspacePool.Open()
 $results = @{}
@@ -524,6 +638,15 @@ ForEach ($FDBItem in $FDB)
     Type = ''
     FWTime = ''
     MinerVer = ''
+    Hashrate = 0.0
+    HashBladeCount = 0
+    Power = 0.0
+    Pool0 = ''
+    Pool0Worker = ''
+    Pool1 = ''
+    Pool1Worker = ''
+    Pool2 = ''
+    Pool2Worker = ''
   }
   #$Devices.Add($FDBItem.MACAddr,$Device)    
 }
@@ -545,13 +668,27 @@ $RunspacePool.Dispose() | Out-Null
   
 ForEach ($Device in $Devices)
 {
-  If ($Device.ipaddr)
+  $devipaddr = $Device.ipaddr 
+  If ($devipaddr)
   {
-    $Device.Type = $results.Item($Device.ipaddr).Type
-    $Device.FWTime = $results.Item($Device.ipaddr).CompileTime
-    $Device.MinerVer = $results.Item($Device.ipaddr).Miner  
+    $dev = $results.Item($devipaddr)
+    $Device.Type = $dev.Type
+    $Device.FWTime = $dev.CompileTime
+    $Device.MinerVer = $dev.Miner
+    $Device.Hashrate = $dev.Hashrate
+    $Device.HashBladeCount = $dev.HashBladeCount
+    $Device.Power =  $dev.Power
+    $Device.Pool0 = $dev.Pool0
+    $Device.Pool0Worker = $dev.Pool0Worker
+    $Device.Pool1 = $dev.Pool1
+    $Device.Pool1Worker = $dev.Pool1Worker
+    $Device.Pool2 = $dev.Pool2
+    $Device.Pool2Worker = $dev.Pool2Worker
   }
 }
 $fileExcel = "devices_$(Get-Date -Format "yyyymmddhhmmss").xlsx"
+$fileCSV = "devices_$(Get-Date -Format "yyyymmddhhmmss").csv"
+
 #$results
-$Devices |Export-Excel -Path $(Join-Path -Path $PSScriptRoot -ChildPath "\data\NEW$fileExcel") -WorkSheetname "Total" -ClearSheet -BoldTopRow -AutoFilter -AutoSize
+$Devices |Export-Excel -Path $(Join-Path -Path $PSScriptRoot -ChildPath "\data\$fileExcel") -WorkSheetname "Total" -ClearSheet -BoldTopRow -AutoFilter -AutoSize
+$Devices | ConvertTo-Csv -Delimiter ";"| Select-Object -Skip 1|Set-Content -Path $(Join-Path -Path $PSScriptRoot -ChildPath "\data\$fileCSV")
