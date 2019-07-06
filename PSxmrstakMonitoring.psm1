@@ -122,22 +122,43 @@ Function Get-MinerHardwareInfo
     $GPUInfo = Invoke-Command -Session $PSSession -ScriptBlock { Get-WmiObject Win32_VideoController }
     If ($GPUInfo)
     {
+      $GPUStatus.GPUPresent = $true
       $GPUStatus.GPUName = $GPUInfo.Name
       $GPUStatus.GPUStatus = $GPUInfo.Status
     }
     Else
     {
+      $GPUStatus.GPUPresent = $false
       $GPUStatus.GPUName = 'None'
-      $GPUStatus.GPUStatus = 'OK'
+      $GPUStatus.GPUStatus = 'None'
     }
   }
   ElseIf ($OS -eq 'linux')
   {
-    $GPUStatus.GPUName = 'Linux'
-    $GPUStatus.GPUStatus = 'Linux'
+    $PasswordSecure  = ConvertTo-SecureString -AsPlainText -String $OSPassword -Force
+    $Cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $OSUser,$PasswordSecure
+    $o = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck
+    $Result = Invoke-Command -ComputerName $Hostname -Credential $cred -UseSSL -Authentication Basic -SessionOption $o -ScriptBlock {
+      Invoke-Expression -Command 'lshw -class display|grep product'   
+  
+    } -ErrorAction SilentlyContinue -ErrorVariable err
+    
+    If ($Result)
+    {
+      $GPUStatus.GPUPresent = $true
+      $GPUStatus.GPUName = $($Result.Split(':'))[1].Trim()
+      $GPUStatus.GPUStatus = 'N/A'
+    }
+    Else
+    {
+      $GPUStatus.GPUPresent = $false
+      $GPUStatus.GPUName = 'None'
+      $GPUStatus.GPUStatus = 'None'
+    }        
   }
   Else
   {
+    $GPUStatus.GPUPresent = $false
     $GPUStatus.GPUName = 'Unable to detect'
     $GPUStatus.GPUStatus = 'Unsupported OS'
   }
